@@ -1,4 +1,4 @@
-import { addToError, createSymbol, toStringTag } from './common.js';
+import { addToError, createSymbol, hasInstance, toStringTag } from './common.js';
 
 export { Loader, ModuleNamespace, REGISTRY }
 
@@ -51,7 +51,7 @@ Loader.prototype.constructor = Loader;
 function ensureInstantiated (module) {
   if (module === undefined)
     return;
-  if (module instanceof ModuleNamespace === false && module[toStringTag] !== 'module')
+  if (module instanceof ModuleNamespace === false && module[toStringTag] !== 'Module' && module[toStringTag] !== 'module')
     throw new TypeError('Module instantiation did not return a valid namespace object.');
   return module;
 }
@@ -114,6 +114,28 @@ Loader.prototype.resolve = function (key, parent) {
   });
 };
 
+/*
+ * Base module namespace constructor
+ *
+ * Implementors can provide a custom MODULE_NAMESPACE constructor derived from ModuleNamespace
+ * with custom logic by overrideing the Loader-specific constructor.
+ */
+Loader.moduleNamespace = createSymbol('module_namespace');
+
+/*
+ * Custom tracing functions
+ *
+ * Implementors can provide custom `trace` and `traceDynanic` functions that will be invoked when
+ * loader.trace === true when new static and dynamic dependencies are observed, respectively.
+ */
+Loader.traceLoad = createSymbol('traceLoad');
+Loader.traceResolvedStaticDependency = createSymbol(
+    'traceResolveStaticDependency'
+);
+Loader.traceDiscoverDynamicDependency = createSymbol(
+    'traceDiscoverDynamicDependency'
+);
+
 // 3.3.4 (import without evaluate)
 // this is not documented because the use of deferred evaluation as in Module.evaluate is not
 // documented, as it is not considered a stable feature to be encouraged
@@ -172,7 +194,7 @@ Registry.prototype.get = function (key) {
 };
 // 4.4.7
 Registry.prototype.set = function (key, namespace) {
-  if (!(namespace instanceof ModuleNamespace || namespace[toStringTag] === 'module'))
+  if (!(namespace instanceof ModuleNamespace || namespace[toStringTag] === 'Module' || namespace[toStringTag] === 'module'))
     throw new Error('Registry must be set with an instance of Module Namespace');
   this[REGISTRY][key] = namespace;
   return this;
@@ -232,6 +254,13 @@ ModuleNamespace.prototype = Object.create(null);
 if (toStringTag)
   Object.defineProperty(ModuleNamespace.prototype, toStringTag, {
     value: 'Module'
+  });
+
+if (hasInstance && toStringTag)
+  Object.defineProperty(ModuleNamespace, hasInstance, {
+    value: function (instance) {
+      return instance[toStringTag] === 'Module' || instance[toStringTag] === 'module';
+    }
   });
 
 function extendNamespace (key) {

@@ -28,7 +28,7 @@ function RegisterLoader () {
     var deleted = registryDelete.call(this, key);
 
     // also delete from register registry if linked
-    if (records.hasOwnProperty(key) && !records[key].linkRecord) {
+    if (records.hasOwnProperty(key) && (records[key].linkRecord || records[key].loadError || records[key].evalError)) {
       delete records[key];
       deleted = true;
     }
@@ -46,6 +46,7 @@ function RegisterLoader () {
   };
 
   // tracing
+  var loader = this;
   this.trace = false;
 }
 
@@ -60,6 +61,12 @@ RegisterLoader.prototype[RegisterLoader.resolve = Loader.resolve] = function (ke
 };
 
 RegisterLoader.prototype[INSTANTIATE] = function (key, processAnonRegister) {};
+
+
+RegisterLoader.prototype[RegisterLoader.moduleNamespace = Loader.moduleNamespace] = ModuleNamespace;
+RegisterLoader.prototype[RegisterLoader.traceDiscoverDynamicDependency = Loader.traceDiscoverDynamicDependency] = traceDiscoverDynamicDependency;
+RegisterLoader.prototype[RegisterLoader.traceLoad = Loader.traceLoad] = traceLoad;
+RegisterLoader.prototype[RegisterLoader.traceResolvedStaticDependency = Loader.traceResolvedStaticDependency] = traceResolveStaticDependency;
 
 // once evaluated, the linkRecord is set to undefined leaving just the other load record properties
 // this allows tracking new binding listeners for es modules through importerSetters
@@ -121,7 +128,7 @@ RegisterLoader.prototype[Loader.resolveInstantiate] = function (key, parentKey) 
 
   return resolveInstantiate(loader, key, parentKey, registry, state)
   .then(function (instantiated) {
-    if (instantiated instanceof ModuleNamespace || instantiated[toStringTag] === 'module')
+    if (instantiated instanceof loader[Loader.moduleNamespace] || instantiated[toStringTag] === 'Module')
       return instantiated;
 
     // resolveInstantiate always returns a load record with a link record and no module value
@@ -208,13 +215,13 @@ function instantiate (loader, load, link, registry, state) {
   .then(function (instantiation) {
     // direct module return from instantiate -> we're done
     if (instantiation !== undefined) {
-      if (!(instantiation instanceof ModuleNamespace || instantiation[toStringTag] === 'module'))
-        throw new TypeError('Instantiate did not return a valid Module object.');
+      if (!(instantiation instanceof loader[Loader.moduleNamespace] || instantiation[toStringTag] === 'Module'))
+        throw new TypeError(`Instantiate did not return a valid ${typeof instantiation} object.`);
 
       delete state.records[load.key];
-      if (loader.trace)
-        traceLoad(loader, load, link);
-      return registry[load.key] = instantiation;
+      registry[load.key] = instantiation;
+      loader[Loader.traceLoad](load, link);
+      return instantiation;
     }
 
     // run the cached loader.register declaration if there is one
@@ -251,7 +258,7 @@ function instantiate (loader, load, link, registry, state) {
 }
 
 // like resolveInstantiate, but returning load records for linking
-function resolveInstantiateDep (loader, key, parentKey, registry, state, traceDepMap) {
+function resolveInstantiateDep (loader, key, parentKey, registry, state) {
   // normalization shortpaths for already-normalized key
   // DISABLED to prioritise consistent resolver calls
   // could add a plain name filter, but doesn't yet seem necessary for perf
@@ -277,8 +284,7 @@ function resolveInstantiateDep (loader, key, parentKey, registry, state, traceDe
   } */
   return loader.resolve(key, parentKey)
   .then(function (resolvedKey) {
-    if (traceDepMap)
-      traceDepMap[key] = resolvedKey;
+    loader[Loader.traceResolvedStaticDependency](parentKey, key, resolvedKey);
 
     // normalization shortpaths for already-normalized key
     var load = state.records[resolvedKey];
@@ -306,14 +312,28 @@ function resolveInstantiateDep (loader, key, parentKey, registry, state, traceDe
   });
 }
 
-function traceLoad (loader, load, link) {
-  loader.loads = loader.loads || {};
-  loader.loads[load.key] = {
-    key: load.key,
-    deps: link.dependencies,
-    dynamicDeps: [],
-    depMap: link.depMap || {}
-  };
+function traceDiscoverDynamicDependency(parentKey, key) {
+  if (this.trace) {
+    this.loads[parentKey].dynamicDeps.push(key);
+  }
+}
+
+function traceResolveStaticDependency(parentKey, key, resolvedKey) {
+  if (this.trace && this.loads[parentKey]) {
+    this.loads[parentKey].depMap[key] = resolvedKey;
+  }
+}
+
+function traceLoad(load, link) {
+  if (this.trace) {
+    this.loads = this.loads || {};
+    this.loads[load.key] = {
+      key: load.key,
+      deps: link.dependencies,
+      dynamicDeps: [],
+      depMap: link.depMap || {}
+    };
+  }
 }
 
 /*
@@ -370,7 +390,7 @@ function instantiateDeps (loader, load, link, registry, state) {
   var depsInstantiatePromises = Array(link.dependencies.length);
 
   for (var i = 0; i < link.dependencies.length; i++)
-    depsInstantiatePromises[i] = resolveInstantiateDep(loader, link.dependencies[i], load.key, registry, state, loader.trace && link.depMap || (link.depMap = {}));
+    depsInstantiatePromises[i] = resolveInstantiateDep(loader, link.dependencies[i], load.key, registry, state);
 
   var depsInstantiatePromise = Promise.all(depsInstantiatePromises)
   .then(function (dependencyInstantiations) {
@@ -383,7 +403,7 @@ function instantiateDeps (loader, load, link, registry, state) {
         if (setter) {
           var instantiation = dependencyInstantiations[i];
 
-          if (instantiation instanceof ModuleNamespace || instantiation[toStringTag] === 'module') {
+          if (instantiation instanceof loader[Loader.moduleNamespace] || instantiation[toStringTag] === 'Module') {
             setter(instantiation);
           }
           else {
@@ -401,11 +421,10 @@ function instantiateDeps (loader, load, link, registry, state) {
     return load;
   });
 
-  if (loader.trace)
-    depsInstantiatePromise = depsInstantiatePromise.then(function () {
-      traceLoad(loader, load, link);
-      return load;
-    });
+  depsInstantiatePromise = depsInstantiatePromise.then(function () {
+    loader[Loader.traceLoad](loader, load, link);
+    return load;
+  });
 
   depsInstantiatePromise = depsInstantiatePromise.catch(function (err) {
     // throw up the instantiateDeps stack
@@ -426,13 +445,13 @@ function deepInstantiateDeps (loader, load, link, registry, state) {
     if (seen.indexOf(load) !== -1)
       return resolvedPromise;
     seen.push(load);
-    
+
     return instantiateDeps(loader, load, link, registry, state)
     .then(function () {
       var depPromises;
       for (var i = 0; i < link.dependencies.length; i++) {
         var depLoad = link.dependencyInstantiations[i];
-        if (!(depLoad instanceof ModuleNamespace || depLoad[toStringTag] === 'module')) {
+        if (!(depLoad instanceof loader[Loader.moduleNamespace] || depLoad[toStringTag] === 'Module')) {
           depPromises = depPromises || [];
           depPromises.push(addDeps(depLoad, depLoad.linkRecord));
         }
@@ -495,8 +514,7 @@ function ContextualLoader (loader, key) {
   throw new TypeError('Cannot subclass the contextual loader only Reflect.Loader.');
 };*/
 ContextualLoader.prototype.import = function (key) {
-  if (this.loader.trace)
-    this.loader.loads[this.key].dynamicDeps.push(key);
+  this.loader[Loader.traceDiscoverDynamicDependency](this.key, key);
   return this.loader.import(key, this.key);
 };
 /*ContextualLoader.prototype.resolve = function (key) {
@@ -530,7 +548,7 @@ function makeDynamicRequire (loader, key, dependencies, dependencyInstantiations
         var depLoad = dependencyInstantiations[i];
         var module;
 
-        if (depLoad instanceof ModuleNamespace || depLoad[toStringTag] === 'module') {
+        if (depLoad instanceof loader[Loader.moduleNamespace] || depLoad[toStringTag] === 'Module') {
           module = depLoad;
         }
         else {
@@ -570,7 +588,7 @@ function doEvaluateDeclarative (loader, load, link, registry, state, seen) {
   var depLoadPromises;
   for (var i = 0; i < link.dependencies.length; i++) {
     var depLoad = link.dependencyInstantiations[i];
-    if (depLoad instanceof ModuleNamespace || depLoad[toStringTag] === 'module')
+    if (depLoad instanceof loader[Loader.moduleNamespace] || depLoad[toStringTag] === 'Module')
       continue;
 
     // custom Module returned from instantiate
@@ -625,13 +643,13 @@ function doEvaluateDeclarative (loader, load, link, registry, state, seen) {
           })
           .then(function () {
             load.linkRecord = undefined;
-            return registry[load.key] = load.module = new ModuleNamespace(link.moduleObj);
+            return registry[load.key] = load.module = new loader[Loader.moduleNamespace](link.moduleObj);
           });
       }
-    
+
       // dispose link record
       load.linkRecord = undefined;
-      registry[load.key] = load.module = new ModuleNamespace(link.moduleObj);
+      registry[load.key] = load.module = new loader[Loader.moduleNamespace](link.moduleObj);
     });
 
   if (link.execute) {
@@ -649,13 +667,13 @@ function doEvaluateDeclarative (loader, load, link, registry, state, seen) {
       })
       .then(function () {
         load.linkRecord = undefined;
-        return registry[load.key] = load.module = new ModuleNamespace(link.moduleObj);
+        return registry[load.key] = load.module = new loader[Loader.moduleNamespace](link.moduleObj);
       });
   }
 
   // dispose link record
   load.linkRecord = undefined;
-  registry[load.key] = load.module = new ModuleNamespace(link.moduleObj);
+  registry[load.key] = load.module = new loader[Loader.moduleNamespace](link.moduleObj);
 }
 
 // non es modules explicitly call moduleEvaluate through require
@@ -699,14 +717,14 @@ function doEvaluateDynamic (loader, load, link, registry, state, seen) {
   var moduleDefault = moduleObj.default;
 
   // __esModule flag extension support via lifting
-  if (moduleDefault && moduleDefault.__esModule) {
+  if (moduleDefault) {
     for (var p in moduleDefault) {
-      if (Object.hasOwnProperty.call(moduleDefault, p))
+      if (Object.hasOwnProperty.call(moduleDefault, p) && !Object.hasOwnProperty.call(moduleObj, p))
         moduleObj[p] = moduleDefault[p];
     }
   }
 
-  registry[load.key] = load.module = new ModuleNamespace(link.moduleObj);
+  registry[load.key] = load.module = new loader[Loader.moduleNamespace](link.moduleObj);
 
   // run importer setters and clear them
   // this allows dynamic modules to update themselves into es modules

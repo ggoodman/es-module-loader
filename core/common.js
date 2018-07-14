@@ -16,6 +16,7 @@ export function createSymbol (name) {
   return hasSymbol ? Symbol() : '@@' + name;
 }
 
+export var hasInstance = hasSymbol && Symbol.hasInstance;
 export var toStringTag = hasSymbol && Symbol.toStringTag;
 
 export function pathToFileUrl (filePath) {
